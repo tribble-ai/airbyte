@@ -1,0 +1,34 @@
+name: Dynamically Build Docker Images for Changed Connectors
+
+on:
+  push:
+    branches: [release]
+    paths:
+      - "airbyte-integrations/connectors/**"
+  pull_request:
+    branches: [master]
+    paths:
+      - "airbyte-integrations/connectors/**"
+
+jobs:
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.find-changes.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Identify changed connectors
+        id: find-changes
+        run: |
+          # Initialize an empty array to hold the list of changed directories
+          changed_dirs=()
+          # Loop through changed files, extracting unique directory names
+          for file in $(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep '^airbyte-integrations/connectors/' | sed -E 's|/[^/]+$||' | uniq); do
+            if [[ -d "$file" ]]; then
+              # Append the directory to the array, stripping the base path
+              changed_dirs+=("${file#airbyte-integrations/connectors/}")
+            fi
+          done
+          # Convert the array to a JSON string and set it as an output variable
+          echo "::set-output name=matrix::{\"include\":"$(printf '%s\n' "${changed_dirs[@]}" | jq -R . | jq -cs .)"}"
