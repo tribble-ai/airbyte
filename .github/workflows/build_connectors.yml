@@ -34,4 +34,4 @@ jobs:
             fi
           done
           # Convert the array to a JSON string and set it as an output variable
-          echo "::set-output name=matrix::{\"include\":"$(printf '%s\n' "${dirs_array[@]}" | jq -R . | jq -cs .)"}"
+          echo "name=matrix::{\"include\":"$(printf '%s\n' "${dirs_array[@]}" | jq -R . | jq -cs .)"}" >> $GITHUB_OUTPUT
