@@ -35,3 +35,24 @@ jobs:
           done
           # Convert the array to a JSON string and set it as an output variable
           echo "name=matrix::{\"include\":"$(printf '%s\n' "${dirs_array[@]}" | jq -R . | jq -cs .)"}" >> $GITHUB_OUTPUT
+
+  build-and-push:
+    needs: prepare-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{fromJson(needs.prepare-matrix.outputs.matrix)}}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Log in to Docker registry
+        uses: docker/login-action@65b78e6e13532edd9afa3aa52ac7964289d1a9c1
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push Docker image
+        uses: docker/build-push-action@f2a1d5e99d037542a71f64918e516c093c6f3fc4
+        with:
+          context: ./airbyte-integrations/connectors/${{ matrix.include }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ github.repository }}/${{ matrix.include }}:latest
