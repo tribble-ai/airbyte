@@ -242,16 +242,6 @@ class Group(ConfluenceStream):
     api_name = "group"
 
 
-class Audit(ConfluenceStream):
-    """
-    API documentation: https://developer.atlassian.com/cloud/confluence/rest/api-group-audit/#api-wiki-rest-api-audit-get
-    """
-
-    primary_key = "author"
-    api_name = "audit"
-    limit = 1000
-
-
 # Source
 class HttpBasicAuthenticator(TokenAuthenticator):
     def __init__(self, email: str, token: str, auth_method: str = "Basic", **kwargs):
@@ -273,27 +263,10 @@ class SourceConfluence(AbstractSource):
         except requests.exceptions.RequestException as e:
             return False, e
 
-    def account_plan_validation(self, config, auth):
-        # stream Audit requires Premium or Standard Plan
-        url = f"https://{config['domain_name']}/wiki/rest/api/audit?limit=1"
-        is_premium_or_standard_plan = False
-        try:
-            response = requests.get(url, headers=auth.get_auth_header())
-            response.raise_for_status()
-            is_premium_or_standard_plan = True
-        except requests.exceptions.RequestException as e:
-            logger.warning(
-                f"An exception occurred while trying to access Audit stream: {str(e)}. Skipping this stream."
-            )
-        finally:
-            return is_premium_or_standard_plan
-
     def streams(self, config: Mapping[str, Any]) -> List[Stream]:
         auth = HttpBasicAuthenticator(
             config["email"], config["api_token"], auth_method="Basic"
         )
         config["authenticator"] = auth
         streams = [Pages(config), BlogPosts(config), Space(config), Group(config)]
-        if self.account_plan_validation(config, auth):
-            streams.append(Audit(config))
         return streams
