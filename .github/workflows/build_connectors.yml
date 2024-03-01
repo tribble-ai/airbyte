@@ -14,11 +14,16 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetches all history for all branches and tags
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+
       - name: Identify changed connectors
         id: find-changes
         run: |
           # For pull requests, compare the PR base branch to the head branch
-          changed_dirs=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }} | grep '^airbyte-integrations/connectors/' | sed -E 's|/[^/]+$||' | uniq)
+          changed_dirs=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }} | grep '^airbyte-integrations/connectors/' | awk -F'/' '{print $1"/"$2"/"$3}' | sort | uniq)
 
           # Initialize an empty array to hold the list of changed directories
           dirs_array=()
