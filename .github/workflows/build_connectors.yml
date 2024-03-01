@@ -2,7 +2,7 @@ name: Dynamically Build Docker Images for Changed Connectors
 
 on:
   pull_request:
-    branches: [release]
+    branches: [master]
     paths:
       - "airbyte-integrations/connectors/**"
 
