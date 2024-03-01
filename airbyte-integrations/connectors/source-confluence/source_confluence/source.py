@@ -142,16 +142,16 @@ class BaseContentStream(ConfluenceStream, ABC):
         current_stream_state: MutableMapping[str, Any],
         latest_record: Mapping[str, Any],
     ) -> Mapping[str, Any]:
-        latest_record_state = get_nested_field(latest_record, self.cursor_field)
-        if stream_state := get_nested_field(current_stream_state, self.cursor_field):
+        latest_record_state = get_nested_field(latest_record, self.real_cursor_field)
+        if stream_state := get_nested_field(current_stream_state, self.real_cursor_field):
             set_nested_field(
                 current_stream_state,
-                self.cursor_field,
+             self.real_cursor_field,
                 max(stream_state, latest_record_state),
             )
             return current_stream_state
         newState = {}
-        set_nested_field(newState, self.cursor_field, latest_record_state)
+        set_nested_field(newState, self.real_cursor_field, latest_record_state)
         return newState
 
     def next_page_token(
@@ -181,7 +181,7 @@ class BaseContentStream(ConfluenceStream, ABC):
         }
 
         if stream_state:
-            cursor = get_nested_field(stream_state, self.cursor_field)
+            cursor = get_nested_field(stream_state, self.real_cursor_field)
             if cursor:
                 params["cql"] = f"{params['cql']} AND lastmodified > \"{convert_date(cursor)}\""
 
@@ -213,7 +213,8 @@ class Pages(BaseContentStream):
     API documentation: https://developer.atlassian.com/cloud/confluence/rest/api-group-content/#api-wiki-rest-api-content-get
     """
 
-    cursor_field = ["history", "lastUpdated", "when"]
+    cursor_field = "history"
+    real_cursor_field = ["history", "lastUpdated", "when"]
     content_type = "page"
 
 
