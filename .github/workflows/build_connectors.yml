@@ -1,11 +1,17 @@
 name: Dynamically Build Docker Images for Changed Connectors
 
 on:
+  push:
+    branches:
+      - "master"
+    paths:
+      - "airbyte-integrations/connectors/**"
+    tags:
+      - "v*"
   pull_request:
     branches: [master]
     paths:
       - "airbyte-integrations/connectors/**"
-
 jobs:
   prepare-matrix:
     runs-on: ubuntu-latest
@@ -23,15 +29,37 @@ jobs:
         id: find-changes
         run: |
           # For pull requests, compare the PR base branch to the head branch
-          changed_dirs=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }} | grep '^airbyte-integrations/connectors/' | awk -F'/' '{print $1"/"$2"/"$3}' | sort | uniq)
+          changed_dirs=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }} | grep '^airbyte-integrations/connectors/' | awk -F'/' '{print $3}' | sort | uniq)
 
-          # Initialize an empty array to hold the list of changed directories
-          dirs_array=()
-          # Loop through changed directories and add them to the array
-          for dir in $changed_dirs; do
-            if [[ -d "$dir" ]]; then
-              dirs_array+=("${dir#airbyte-integrations/connectors/}")
-            fi
-          done
-          # Convert the array to a JSON string and set it as an output variable
-          echo "::set-output name=matrix::{\"include\":"$(printf '%s\n' "${dirs_array[@]}" | jq -R . | jq -cs .)"}"
+          # Wrap each directory in an object with a "connector" key, then convert to a JSON string
+          matrix_json=$(printf "%s\n" "${changed_dirs[@]}" | jq -R '{connector: .}' | jq -cs .)
+          echo "matrix={\"include\":${matrix_json}}" >> $GITHUB_OUTPUT
+
+  build-and-push:
+    needs: prepare-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{fromJson(needs.prepare-matrix.outputs.matrix)}}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Log in to Docker Hub
+        uses: docker/login-action@f4ef78c080cd8ba55a85445d5b36e214a81df20a
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
+        with:
+          images: |
+            tribbleai/${{ matrix.connector }}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@f2a1d5e99d037542a71f64918e516c093c6f3fc4
+        with:
+          context: ./airbyte-integrations/connectors/${{ matrix.connector }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
