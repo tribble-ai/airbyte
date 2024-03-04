@@ -138,6 +138,9 @@
         },
         "previousVersion": {
           "$ref": "#/definitions/version"
+        },
+        "lastUpdated": {
+          "$ref": "#/definitions/version"
         }
       }
     },

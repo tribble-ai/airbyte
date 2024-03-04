@@ -1,0 +1,94 @@
+name: Dynamically Build Docker Images for Changed Connectors
+
+on:
+  push:
+    branches:
+      - "master"
+    paths:
+      - "airbyte-integrations/connectors/**"
+    tags:
+      - "v*"
+  pull_request:
+    branches: [master]
+    paths:
+      - "airbyte-integrations/connectors/**"
+jobs:
+  prepare-matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.find-changes.outputs.matrix }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Fetches all history for all branches and tags
+          ref: ${{ github.event.pull_request.head.ref }}
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+
+      - name: Identify changed connectors
+        id: find-changes
+        run: |
+          # For pull requests, compare the PR base branch to the head branch
+          changed_dirs=$(git diff --name-only ${{ github.event.pull_request.base.sha }} ${{ github.event.pull_request.head.sha }} | grep '^airbyte-integrations/connectors/' | awk -F'/' '{print $3}' | sort | uniq)
+
+          # Wrap each directory in an object with a "connector" key, then convert to a JSON string
+          matrix_json=$(printf "%s\n" "${changed_dirs[@]}" | jq -R '{connector: .}' | jq -cs .)
+          echo "matrix={\"include\":${matrix_json}}" >> $GITHUB_OUTPUT
+
+  build-and-push:
+    needs: prepare-matrix
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{fromJson(needs.prepare-matrix.outputs.matrix)}}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@f4ef78c080cd8ba55a85445d5b36e214a81df20a
+        with:
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+
+      - name: Extract metadata (tags, labels) for Docker
+        id: meta
+        uses: docker/metadata-action@9ec57ed1fcdbf14dcef7dfbe97b2010124a938b7
+        with:
+          images: |
+            tribbleai/${{ matrix.connector }}
+
+      - name: Check for Custom Dockerfile
+        id: check-dockerfile
+        run: |
+          if [ -f "./airbyte-integrations/connectors/${{ matrix.connector }}/Dockerfile" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Airbyte CI
+        if: steps.check-dockerfile.outputs.exists == 'false'
+        id: install-airbyte-ci
+        uses: ./.github/actions/install-airbyte-ci
+        with:
+          airbyte_ci_binary_url: https://connectors.airbyte.com/airbyte-ci/releases/ubuntu/latest/airbyte-ci
+
+      - name: Custom Build Steps if Custom Dockerfile Exists
+        if: steps.check-dockerfile.outputs.exists == 'false'
+        run: |
+          echo "Custom Dockerfile found, running custom build steps for ${{ matrix.connector }}"
+          airbyte-ci --disable-update-check --disable-dagger-run --is-local connectors --disable-report-auto-open --name=${{matrix.connector}} build
+          docker tag airbyte/${{ matrix.connector }}:dev ${{ steps.meta.outputs.tags }}
+          docker push ${{ steps.meta.outputs.tags }}
+        env:
+          CI_GIT_BRANCH: ${{ inputs.git_branch || github.head_ref }}
+          CI_GIT_REVISION: ${{ inputs.git_revision || github.sha }}
+
+      - name: Build and push Docker image if Custom Dockerfile Does Not Exist
+        if: steps.check-dockerfile.outputs.exists == 'true'
+        uses: docker/build-push-action@f2a1d5e99d037542a71f64918e516c093c6f3fc4
+        with:
+          context: ./airbyte-integrations/connectors/${{ matrix.connector }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
