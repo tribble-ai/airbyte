@@ -1,19 +1,16 @@
 name: Dynamically Build Docker Images for Changed Connectors
 
 on:
-  push:
-    branches:
-      - "master"
-    paths:
-      - "airbyte-integrations/connectors/**"
-    tags:
-      - "v*"
   pull_request:
     branches: [master]
+    types:
+      - closed
     paths:
       - "airbyte-integrations/connectors/**"
+
 jobs:
   prepare-matrix:
+    if: github.event.pull_request.merge == true
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.find-changes.outputs.matrix }}
