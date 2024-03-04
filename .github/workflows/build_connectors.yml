@@ -43,6 +43,7 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+
       - name: Log in to Docker Hub
         uses: docker/login-action@f4ef78c080cd8ba55a85445d5b36e214a81df20a
         with:
@@ -56,7 +57,35 @@ jobs:
           images: |
             tribbleai/${{ matrix.connector }}
 
-      - name: Build and push Docker image
+      - name: Check for Custom Dockerfile
+        id: check-dockerfile
+        run: |
+          if [ -f "./airbyte-integrations/connectors/${{ matrix.connector }}/Dockerfile" ]; then
+            echo "exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Install Airbyte CI
+        if: steps.check-dockerfile.outputs.exists == 'false'
+        id: install-airbyte-ci
+        uses: ./.github/actions/install-airbyte-ci
+        with:
+          airbyte_ci_binary_url: https://connectors.airbyte.com/airbyte-ci/releases/ubuntu/latest/airbyte-ci
+
+      - name: Custom Build Steps if Custom Dockerfile Exists
+        if: steps.check-dockerfile.outputs.exists == 'false'
+        run: |
+          echo "Custom Dockerfile found, running custom build steps for ${{ matrix.connector }}"
+          airbyte-ci --disable-update-check --disable-dagger-run --is-local connectors --disable-report-auto-open --name=${{matrix.connector}} build
+          docker tag airbyte/${{ matrix.connector }}:dev ${{ steps.meta.outputs.tags }}
+          docker push ${{ steps.meta.outputs.tags }}
+        env:
+          CI_GIT_BRANCH: ${{ inputs.git_branch || github.head_ref }}
+          CI_GIT_REVISION: ${{ inputs.git_revision || github.sha }}
+
+      - name: Build and push Docker image if Custom Dockerfile Does Not Exist
+        if: steps.check-dockerfile.outputs.exists == 'true'
         uses: docker/build-push-action@f2a1d5e99d037542a71f64918e516c093c6f3fc4
         with:
           context: ./airbyte-integrations/connectors/${{ matrix.connector }}
