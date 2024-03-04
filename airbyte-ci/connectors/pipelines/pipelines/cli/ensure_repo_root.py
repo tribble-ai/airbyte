@@ -9,7 +9,8 @@ import git
 
 def _validate_airbyte_repo(repo: git.Repo) -> bool:
     """Check if any of the remotes are the airbyte repo."""
-    expected_repo_name = "airbytehq/airbyte"
+    expected_repo_name = "tribble-ai/airbyte"
+    logging.info(repo)
     for remote in repo.remotes:
         if expected_repo_name in remote.url:
             return True
