@@ -185,6 +185,10 @@ class BaseContentStream(ConfluenceStream, ABC):
             if cursor:
                 params["cql"] = f"{params['cql']} AND lastmodified > \"{convert_date(cursor)}\""
 
+        if "pages" in self.config:
+            page_titles = [f'\"{page}\"' for page in self.config['pages']]
+            params["cql"] = f"{params['cql']} AND title IN ({','.join(page_titles)})"
+
         if "cql" in self.config:
             params["cql"] = f"{params['cql']} AND {self.config['cql']}"
 

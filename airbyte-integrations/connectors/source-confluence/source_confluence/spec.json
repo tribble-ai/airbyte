@@ -30,6 +30,14 @@
         "type": "string",
         "description": "CQL query to filter the data",
         "examples": ["type = 'page'"]
+      },
+      "pages": {
+        "title": "Pages",
+        "type": "array",
+        "description": "List of pages to fetch",
+        "items": {
+          "type": "string"
+        }
       }
     }
   }
