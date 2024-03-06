@@ -10,8 +10,7 @@
       "api_token": {
         "title": "API Token",
         "type": "string",
-        "description": "Please follow the Jira confluence for generating an API token: <a href=\"https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/\">generating an API token</a>.",
-        "airbyte_secret": true
+        "description": "Please follow the Jira confluence for generating an API token: <a href=\"https://support.atlassian.com/atlassian-account/docs/manage-api-tokens-for-your-atlassian-account/\">generating an API token</a>."
       },
       "domain_name": {
         "title": "Domain name",
@@ -36,7 +35,19 @@
         "type": "array",
         "description": "List of pages to fetch",
         "items": {
-          "type": "string"
+          "type": "object",
+          "properties": {
+            "id": {
+              "title": "ID",
+              "type": "string",
+              "description": "Page ID"
+            },
+            "title": {
+              "title": "Title",
+              "type": "string",
+              "description": "Page title"
+            }
+          }
         }
       }
     }

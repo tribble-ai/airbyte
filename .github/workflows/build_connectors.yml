@@ -5,12 +5,13 @@ on:
     branches: [master]
     types:
       - closed
+      - opened
+      - synchronize
     paths:
       - "airbyte-integrations/connectors/**"
 
 jobs:
   prepare-matrix:
-    if: github.event.pull_request.merge == true
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.find-changes.outputs.matrix }}
@@ -75,8 +76,8 @@ jobs:
         run: |
           echo "Custom Dockerfile found, running custom build steps for ${{ matrix.connector }}"
           airbyte-ci --disable-update-check --disable-dagger-run --is-local connectors --disable-report-auto-open --name=${{matrix.connector}} build
-          docker tag airbyte/${{ matrix.connector }}:dev ${{ steps.meta.outputs.tags }}
-          docker push ${{ steps.meta.outputs.tags }}
+          docker tag airbyte/${{ matrix.connector }}:dev ${{ steps.meta.outputs.tags }}${{ github.event.pull_request.merge == false && '-dev' || '' }}
+          docker push ${{ steps.meta.outputs.tags }}${{ github.event.pull_request.merge == false && '-dev' || '' }}
         env:
           CI_GIT_BRANCH: ${{ inputs.git_branch || github.head_ref }}
           CI_GIT_REVISION: ${{ inputs.git_revision || github.sha }}
@@ -87,5 +88,5 @@ jobs:
         with:
           context: ./airbyte-integrations/connectors/${{ matrix.connector }}
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}${{ github.event.pull_request.merge == false && '-dev' || '' }}
           labels: ${{ steps.meta.outputs.labels }}
