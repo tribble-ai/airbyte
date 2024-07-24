@@ -4,7 +4,7 @@
     "$schema": "http://json-schema.org/draft-07/schema#",
     "title": "Confluence Spec",
     "type": "object",
-    "required": ["api_token", "domain_name", "email"],
+    "required": ["api_token", "domain_name", "email", "pages"],
     "additionalProperties": true,
     "properties": {
       "api_token": {
@@ -49,6 +49,12 @@
             }
           }
         }
+      },
+      "include_children": {
+        "title": "Include Children",
+        "type": "boolean",
+        "description": "Include children pages",
+        "default": false
       }
     }
   }
