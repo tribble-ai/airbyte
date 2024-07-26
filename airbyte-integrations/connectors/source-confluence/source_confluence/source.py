@@ -247,7 +247,7 @@ class BaseContentStream(ConfluenceStream, ABC):
         if stream_slice:
             params["cql"] = f"{params['cql']} AND id IN ({','.join(stream_slice['page_ids'])})"
             
-        if stream_state:
+        if stream_state and stream_state.get("cursor"):
             cursor = stream_state.get("cursor") 
             if not stream_slice.get("is_new", True):
                 params["cql"] = f"{params['cql']} AND lastmodified > \"{convert_date(cursor, self.timezone)}\""
