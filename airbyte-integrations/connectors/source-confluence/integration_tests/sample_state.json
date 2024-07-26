@@ -1,0 +1,16 @@
+[
+  {
+    "type": "STREAM",
+    "stream": {
+      "stream_descriptor": { "name": "pages", "namespace": null },
+      "stream_state": {
+        "6029313": { "cursor": "2024-03-20T15:30:19.770Z" },
+        "cursor": "2024-07-23T19:24:43.735Z",
+        "31653891": { "cursor": "2024-07-23T19:24:43.735Z" },
+        "31588354": { "cursor": "2024-07-23T19:21:53.937Z" },
+        "31555588": { "cursor": "2024-07-23T19:21:19.273Z" }
+      }
+    },
+    "sourceStats": { "recordCount": 3.0 }
+  }
+]
