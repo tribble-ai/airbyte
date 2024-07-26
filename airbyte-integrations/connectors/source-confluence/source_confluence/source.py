@@ -16,6 +16,7 @@ from airbyte_cdk.sources.streams.http import HttpStream
 from airbyte_cdk.sources.streams.http.requests_native_auth import TokenAuthenticator
 from airbyte_cdk.sources.utils.transform import TransformConfig, TypeTransformer
 from datetime import datetime
+from dateutil import tz
 from itertools import islice
 
 logger = logging.getLogger("airbyte")
@@ -61,11 +62,28 @@ def get_all_children(domain, email, api_token, ancestor_ids):
 
     return children
 
-def convert_date(date_string):
-    # Parse the date string into a datetime object
-    date_object = datetime.strptime(date_string, "%Y-%m-%dT%H:%M:%S.%fZ")
+def get_system_info(domain, email, api_token):
+    url = f"https://{domain}/wiki/rest/api/settings/systemInfo"
+    auth = HTTPBasicAuth(email, api_token)
+    headers = {
+        "Accept": "application/json"
+    }
 
-    # Format the datetime object into the desired string format
+    response = requests.get(url, headers=headers, auth=auth)
+    response.raise_for_status()
+
+    return response.json()
+
+def convert_date(date_string, timezone):
+    # Parse the date string into a datetime date is GMT
+    date_object = datetime.strptime(date_string, "%Y-%m-%dT%H:%M:%S.%fZ")
+    date_object = date_object.replace(tzinfo=tz.tzutc())  # Set timezone to GMT
+
+    # Convert the date object to the specified timezone
+    timezone_obj = tz.gettz(timezone)
+    date_object = date_object.astimezone(timezone_obj)
+
+    # Format the datetime object into the desired string format YYYY-MM-DD HH:MM
     formatted_date = date_object.strftime("%Y-%m-%d %H:%M")
 
     return formatted_date
@@ -124,6 +142,7 @@ class ConfluenceStream(HttpStream, ABC):
         super().__init__(authenticator=config["authenticator"])
         self.config = config
         self.url_base = self.url_base.format(config["domain_name"])
+        self.timezone = get_system_info(config["domain_name"], config["email"], config["api_token"])["defaultTimeZone"]
 
     def next_page_token(
         self, response: requests.Response
@@ -231,7 +250,7 @@ class BaseContentStream(ConfluenceStream, ABC):
         if stream_state:
             cursor = stream_state.get("cursor") 
             if not stream_slice.get("is_new", True):
-                params["cql"] = f"{params['cql']} AND lastmodified > \"{convert_date(cursor)}\""
+                params["cql"] = f"{params['cql']} AND lastmodified > \"{convert_date(cursor, self.timezone)}\""
 
         if "cql" in self.config:
             params["cql"] = f"{params['cql']} AND {self.config['cql']}"
