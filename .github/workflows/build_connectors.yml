@@ -9,6 +9,7 @@ on:
       - synchronize
     paths:
       - "airbyte-integrations/connectors/**"
+      - ".github/workflows/build_connectors.yml"
 
 jobs:
   prepare-matrix:
