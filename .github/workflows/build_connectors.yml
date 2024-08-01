@@ -70,7 +70,7 @@ jobs:
         id: install-airbyte-ci
         uses: ./.github/actions/install-airbyte-ci
         with:
-          airbyte_ci_binary_url: https://connectors.airbyte.com/airbyte-ci/releases/ubuntu/latest/airbyte-ci
+          airbyte_ci_binary_url: https://connectors.airbyte.com/airbyte-ci/releases/ubuntu/2.13.0/airbyte-ci
 
       - name: Custom Build Steps if Custom Dockerfile Exists
         if: steps.check-dockerfile.outputs.exists == 'false'
@@ -91,4 +91,3 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}${{ github.event.pull_request.merge == false && '-dev' || '' }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64/v3
