@@ -91,4 +91,3 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}${{ github.event.pull_request.merge == false && '-dev' || '' }}
           labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64/v3
