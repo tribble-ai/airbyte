@@ -194,6 +194,7 @@ class BaseContentStream(ConfluenceStream, ABC):
         "body",
         "body.storage",
         "body.view",
+        "body.styled_view",
     ]
     limit = 25
     content_type = None
