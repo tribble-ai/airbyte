@@ -57,6 +57,8 @@ python main.py read --config secrets/config.json --catalog integration_tests/con
 
 ### Locally running the connector docker image
 
+
+
 #### Build
 First, make sure you build the latest Docker image:
 ```
