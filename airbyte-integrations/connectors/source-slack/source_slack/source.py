@@ -147,6 +147,10 @@ class ChanneledStream(SlackStream, ABC):
 class Channels(ChanneledStream):
     data_field = "channels"
 
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self._found_channel_names: set = set()
+
     @property
     def use_cache(self) -> bool:
         return True
@@ -159,11 +163,20 @@ class Channels(ChanneledStream):
         params["types"] = "public_channel,private_channel"
         return params
 
+    def next_page_token(self, response: requests.Response) -> Optional[Mapping[str, Any]]:
+        # Short-circuit pagination once all filtered channel names have been found,
+        # avoiding a full workspace scan on large Slack instances.
+        if self.channel_filter and self._found_channel_names >= set(self.channel_filter):
+            return None
+        return super().next_page_token(response)
+
     def parse_response(self, response: requests.Response, **kwargs) -> Iterable[MutableMapping]:
         json_response = response.json()
         channels = json_response.get(self.data_field, [])
         if self.channel_filter:
             channels = [channel for channel in channels if channel["name"] in self.channel_filter]
+            for channel in channels:
+                self._found_channel_names.add(channel["name"])
         yield from channels
 
     def read_records(self, sync_mode: SyncMode, **kwargs) -> Iterable[Mapping[str, Any]]:
@@ -171,6 +184,8 @@ class Channels(ChanneledStream):
         Override the default `read_records` method to provide the `JoinChannelsStream` functionality,
         and be able to read all the channels, not just the ones that already has the API Bot joined.
         """
+        # Reset per-read so short-circuit works correctly on repeated calls.
+        self._found_channel_names = set()
         for channel in super().read_records(sync_mode=sync_mode):
             # check the channel should be joined before reading
             if self.should_join_to_channel(channel):
@@ -188,6 +203,10 @@ class ChannelMembers(ChanneledStream):
     data_field = "members"
     primary_key = ["member_id", "channel_id"]
 
+    def __init__(self, channels: Optional["Channels"] = None, **kwargs):
+        self._channels = channels
+        super().__init__(**kwargs)
+
     def path(self, **kwargs) -> str:
         return "conversations.members"
 
@@ -202,7 +221,7 @@ class ChannelMembers(ChanneledStream):
             yield {"member_id": member_id, "channel_id": stream_slice["channel_id"]}
 
     def stream_slices(self, **kwargs) -> Iterable[Optional[Mapping[str, Any]]]:
-        channels_stream = Channels(authenticator=self._session.auth, channel_filter=self.channel_filter)
+        channels_stream = self._channels or Channels(authenticator=self._session.auth, channel_filter=self.channel_filter)
         for channel_record in channels_stream.read_records(sync_mode=SyncMode.full_refresh):
             yield {"channel_id": channel_record["id"]}
 
@@ -290,8 +309,9 @@ class ChannelMessages(HttpSubStream, IncrementalMessageStream):
 
 
 class Threads(IncrementalMessageStream):
-    def __init__(self, lookback_window: Mapping[str, int], **kwargs):
+    def __init__(self, lookback_window: Mapping[str, int], channels: Optional["Channels"] = None, **kwargs):
         self.messages_lookback_window = lookback_window
+        self._channels = channels
         super().__init__(**kwargs)
 
     def path(self, **kwargs) -> str:
@@ -317,7 +337,7 @@ class Threads(IncrementalMessageStream):
         """
 
         stream_state = stream_state or {}
-        channels_stream = Channels(authenticator=self._session.auth, channel_filter=self.channel_filter)
+        channels_stream = self._channels or Channels(authenticator=self._session.auth, channel_filter=self.channel_filter)
 
         if self.cursor_field in stream_state:
             # Since new messages can be posted to threads continuously after the parent message has been posted,
@@ -389,7 +409,7 @@ class SourceSlack(AbstractSource):
         channels = Channels(authenticator=authenticator, join_channels=should_join_to_channels, channel_filter=channel_filter)
         streams = [
             channels,
-            ChannelMembers(authenticator=authenticator, channel_filter=channel_filter),
+            ChannelMembers(authenticator=authenticator, channel_filter=channel_filter, channels=channels),
             ChannelMessages(
                 parent=channels,
                 authenticator=authenticator,
@@ -403,6 +423,7 @@ class SourceSlack(AbstractSource):
                 end_date=end_date,
                 lookback_window=threads_lookback_window,
                 channel_filter=channel_filter,
+                channels=channels,
             ),
             Users(authenticator=authenticator),
         ]
