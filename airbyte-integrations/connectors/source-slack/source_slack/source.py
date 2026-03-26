@@ -6,6 +6,8 @@
 from abc import ABC, abstractmethod
 from typing import Any, Iterable, List, Mapping, MutableMapping, Optional, Tuple
 
+import time
+
 import pendulum
 import requests
 from airbyte_cdk import AirbyteLogger
@@ -147,8 +149,9 @@ class ChanneledStream(SlackStream, ABC):
 class Channels(ChanneledStream):
     data_field = "channels"
 
-    def __init__(self, **kwargs):
+    def __init__(self, channel_ids: List[str] = None, **kwargs):
         super().__init__(**kwargs)
+        self._channel_ids = channel_ids or []
         self._found_channel_names: set = set()
 
     @property
@@ -179,24 +182,59 @@ class Channels(ChanneledStream):
                 self._found_channel_names.add(channel["name"])
         yield from channels
 
+    def _fetch_channel_by_id(self, channel_id: str) -> Optional[Mapping[str, Any]]:
+        """Fetch a single channel record via conversations.info, respecting rate limits.
+
+        Uses direct ID lookup instead of paginating conversations.list, which avoids
+        scanning the entire workspace when specific channel IDs are already known.
+        """
+        url = f"{self.url_base}conversations.info"
+        for _ in range(self.max_retries + 1):
+            response = self._session.get(url, params={"channel": channel_id})
+            if response.status_code == 429:
+                wait = int(response.headers.get("Retry-After", 5))
+                self.logger.info(f"Rate limited on conversations.info for {channel_id}, retrying in {wait}s")
+                time.sleep(wait)
+                continue
+            data = response.json()
+            if data.get("ok"):
+                return data.get("channel")
+            self.logger.warning(f"conversations.info error for channel {channel_id}: {data.get('error')}")
+            return None
+        self.logger.error(f"Max retries exceeded for conversations.info on channel {channel_id}")
+        return None
+
     def read_records(self, sync_mode: SyncMode, **kwargs) -> Iterable[Mapping[str, Any]]:
         """
         Override the default `read_records` method to provide the `JoinChannelsStream` functionality,
         and be able to read all the channels, not just the ones that already has the API Bot joined.
+
+        When channel_ids are provided, fetches each channel directly via conversations.info
+        instead of paginating conversations.list across the full workspace.
         """
-        # Reset per-read so short-circuit works correctly on repeated calls.
-        self._found_channel_names = set()
-        for channel in super().read_records(sync_mode=sync_mode):
-            # check the channel should be joined before reading
-            if self.should_join_to_channel(channel):
-                # join the channel before reading it
-                yield from self.join_channels_stream.read_records(
-                    sync_mode=sync_mode,
-                    stream_slice=self.make_join_channel_slice(channel),
-                )
-            # reading the channel data
-            self.logger.info(f"Reading the channel: `{channel.get('name')}`")
-            yield channel
+        if self._channel_ids:
+            for channel_id in self._channel_ids:
+                channel = self._fetch_channel_by_id(channel_id)
+                if not channel:
+                    continue
+                if self.should_join_to_channel(channel):
+                    yield from self.join_channels_stream.read_records(
+                        sync_mode=sync_mode,
+                        stream_slice=self.make_join_channel_slice(channel),
+                    )
+                self.logger.info(f"Reading the channel: `{channel.get('name')}`")
+                yield channel
+        else:
+            # Reset per-read so short-circuit works correctly on repeated calls.
+            self._found_channel_names = set()
+            for channel in super().read_records(sync_mode=sync_mode):
+                if self.should_join_to_channel(channel):
+                    yield from self.join_channels_stream.read_records(
+                        sync_mode=sync_mode,
+                        stream_slice=self.make_join_channel_slice(channel),
+                    )
+                self.logger.info(f"Reading the channel: `{channel.get('name')}`")
+                yield channel
 
 
 class ChannelMembers(ChanneledStream):
@@ -404,9 +442,15 @@ class SourceSlack(AbstractSource):
         end_date = end_date and pendulum.parse(end_date)
         threads_lookback_window = pendulum.Duration(days=config["lookback_window"])
         channel_filter = config.get("channel_filter", [])
+        channel_ids = config.get("channel_ids", [])
         should_join_to_channels = config.get("join_channels")
 
-        channels = Channels(authenticator=authenticator, join_channels=should_join_to_channels, channel_filter=channel_filter)
+        channels = Channels(
+            authenticator=authenticator,
+            join_channels=should_join_to_channels,
+            channel_filter=channel_filter,
+            channel_ids=channel_ids,
+        )
         streams = [
             channels,
             ChannelMembers(authenticator=authenticator, channel_filter=channel_filter, channels=channels),
