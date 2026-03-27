@@ -107,4 +107,68 @@ def test_channels_stream_with_autojoin(authenticator) -> None:
     ]
     stream = Channels(channel_filter=[], join_channels=True, authenticator=authenticator)
     assert list(stream.read_records(None)) == expected
+
+
+def test_channels_stream_with_channel_ids(requests_mock, authenticator) -> None:
+    """
+    When channel_ids are provided, Channels.read_records should fetch each channel
+    via conversations.info directly, bypassing conversations.list pagination entirely.
+    """
+    requests_mock.get(
+        "https://slack.com/api/conversations.info",
+        [
+            {"json": {"ok": True, "channel": {"id": "C001", "name": "general", "is_member": True, "is_private": False}}},
+            {"json": {"ok": True, "channel": {"id": "C002", "name": "engineering", "is_member": True, "is_private": False}}},
+        ],
+    )
+
+    stream = Channels(channel_ids=["C001", "C002"], channel_filter=[], join_channels=False, authenticator=authenticator)
+    results = list(stream.read_records(None))
+
+    assert results == [
+        {"id": "C001", "name": "general", "is_member": True, "is_private": False},
+        {"id": "C002", "name": "engineering", "is_member": True, "is_private": False},
+    ]
+    # conversations.list should never have been called
+    assert not any("conversations.list" in str(r.url) for r in requests_mock.request_history)
+
+
+def test_channels_stream_channel_ids_skips_not_found(requests_mock, authenticator) -> None:
+    """
+    If conversations.info returns ok=false for a channel ID (e.g. bot lost access),
+    that channel is skipped rather than crashing the sync.
+    """
+    requests_mock.get(
+        "https://slack.com/api/conversations.info",
+        [
+            {"json": {"ok": True, "channel": {"id": "C001", "name": "general", "is_member": True, "is_private": False}}},
+            {"json": {"ok": False, "error": "channel_not_found"}},
+        ],
+    )
+
+    stream = Channels(channel_ids=["C001", "C_GONE"], channel_filter=[], join_channels=False, authenticator=authenticator)
+    results = list(stream.read_records(None))
+
+    assert len(results) == 1
+    assert results[0]["id"] == "C001"
+
+
+def test_channels_stream_channel_ids_rate_limit_retry(requests_mock, authenticator) -> None:
+    """
+    A 429 on conversations.info should be retried after honoring Retry-After,
+    and ultimately return the channel.
+    """
+    requests_mock.get(
+        "https://slack.com/api/conversations.info",
+        [
+            {"status_code": 429, "headers": {"Retry-After": "1"}},
+            {"json": {"ok": True, "channel": {"id": "C001", "name": "general", "is_member": True, "is_private": False}}},
+        ],
+    )
+
+    stream = Channels(channel_ids=["C001"], channel_filter=[], join_channels=False, authenticator=authenticator)
+    results = list(stream.read_records(None))
+
+    assert len(results) == 1
+    assert results[0]["id"] == "C001"
     

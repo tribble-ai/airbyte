@@ -1,6 +1,8 @@
 *
 !Dockerfile
 !source_slack
-!setup.py
+!pyproject.toml
+!poetry.lock
+!README.md
 !main.py
 !secrets
