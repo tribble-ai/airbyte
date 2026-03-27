@@ -118,10 +118,11 @@ class JoinChannelsStream(HttpStream):
 
 
 class ChanneledStream(SlackStream, ABC):
-    """Slack stream with channel filter"""
+    """Slack stream with optional channel name filter and/or explicit channel IDs."""
 
-    def __init__(self, channel_filter: List[str] = [], join_channels: bool = False, **kwargs):
-        self.channel_filter = channel_filter
+    def __init__(self, channel_filter: Optional[List[str]] = None, channel_ids: Optional[List[str]] = None, join_channels: bool = False, **kwargs):
+        self.channel_filter = channel_filter or []
+        self.channel_ids = channel_ids or []
         self.join_channels = join_channels
         self.kwargs = kwargs
         super().__init__(**kwargs)
@@ -166,20 +167,86 @@ class Channels(ChanneledStream):
             channels = [channel for channel in channels if channel["name"] in self.channel_filter]
         yield from channels
 
+    @staticmethod
+    def _dedupe_channel_ids(channel_ids: List[str]) -> List[str]:
+        seen = set()
+        out: List[str] = []
+        for cid in channel_ids:
+            if cid not in seen:
+                seen.add(cid)
+                out.append(cid)
+        return out
+
+    def _get_channel_info(self, channel_id: str) -> Mapping[str, Any]:
+        """Resolve a single channel via conversations.info (no workspace-wide list)."""
+        url = f"{self.url_base}conversations.info"
+        params: MutableMapping[str, Any] = {"channel": channel_id, "limit": self.page_size}
+        response = self._session.get(url, params=params)
+        response.raise_for_status()
+        data = response.json()
+        if data.get("ok") is False:
+            raise Exception(f"conversations.info failed for channel {channel_id}: {data.get('error')}")
+        return data["channel"]
+
+    def _paginate_list_for_names(self, remaining: set) -> Iterable[Mapping[str, Any]]:
+        """Yield channels whose names are in `remaining`; remove matched names. Stops when all are found or list ends."""
+        cursor: Optional[str] = None
+        while remaining:
+            params: MutableMapping[str, Any] = {"limit": self.page_size, "types": "public_channel,private_channel"}
+            if cursor:
+                params["cursor"] = cursor
+            url = f"{self.url_base}conversations.list"
+            response = self._session.get(url, params=params)
+            response.raise_for_status()
+            data = response.json()
+            if data.get("ok") is False:
+                raise Exception(f"conversations.list failed: {data.get('error')}")
+            for ch in data.get("channels", []):
+                name = ch.get("name")
+                if name in remaining:
+                    remaining.discard(name)
+                    yield ch
+            if not remaining:
+                break
+            cursor = data.get("response_metadata", {}).get("next_cursor")
+            if not cursor:
+                break
+
+    def _iter_channels_resolved(self) -> Iterable[Mapping[str, Any]]:
+        """List all channels, or resolve by IDs and/or names with minimal conversations.list pagination."""
+        if not self.channel_ids and not self.channel_filter:
+            yield from super().read_records(sync_mode=SyncMode.full_refresh)
+            return
+
+        seen_ids: set = set()
+        resolved_names: set = set()
+
+        for cid in self._dedupe_channel_ids(self.channel_ids):
+            channel = self._get_channel_info(cid)
+            seen_ids.add(channel["id"])
+            if channel.get("name"):
+                resolved_names.add(channel["name"])
+            yield channel
+
+        if self.channel_filter:
+            remaining = set(self.channel_filter) - resolved_names
+            if remaining:
+                for ch in self._paginate_list_for_names(remaining):
+                    if ch["id"] not in seen_ids:
+                        seen_ids.add(ch["id"])
+                        yield ch
+
     def read_records(self, sync_mode: SyncMode, **kwargs) -> Iterable[Mapping[str, Any]]:
         """
         Override the default `read_records` method to provide the `JoinChannelsStream` functionality,
         and be able to read all the channels, not just the ones that already has the API Bot joined.
         """
-        for channel in super().read_records(sync_mode=sync_mode):
-            # check the channel should be joined before reading
+        for channel in self._iter_channels_resolved():
             if self.should_join_to_channel(channel):
-                # join the channel before reading it
                 yield from self.join_channels_stream.read_records(
                     sync_mode=sync_mode,
                     stream_slice=self.make_join_channel_slice(channel),
                 )
-            # reading the channel data
             self.logger.info(f"Reading the channel: `{channel.get('name')}`")
             yield channel
 
@@ -202,7 +269,11 @@ class ChannelMembers(ChanneledStream):
             yield {"member_id": member_id, "channel_id": stream_slice["channel_id"]}
 
     def stream_slices(self, **kwargs) -> Iterable[Optional[Mapping[str, Any]]]:
-        channels_stream = Channels(authenticator=self._session.auth, channel_filter=self.channel_filter)
+        channels_stream = Channels(
+            authenticator=self._session.auth,
+            channel_filter=self.channel_filter,
+            channel_ids=self.channel_ids,
+        )
         for channel_record in channels_stream.read_records(sync_mode=SyncMode.full_refresh):
             yield {"channel_id": channel_record["id"]}
 
@@ -317,7 +388,11 @@ class Threads(IncrementalMessageStream):
         """
 
         stream_state = stream_state or {}
-        channels_stream = Channels(authenticator=self._session.auth, channel_filter=self.channel_filter)
+        channels_stream = Channels(
+            authenticator=self._session.auth,
+            channel_filter=self.channel_filter,
+            channel_ids=self.channel_ids,
+        )
 
         if self.cursor_field in stream_state:
             # Since new messages can be posted to threads continuously after the parent message has been posted,
@@ -335,12 +410,16 @@ class Threads(IncrementalMessageStream):
             authenticator=self._session.auth,
             default_start_date=messages_start_date,
             end_date=self._end_ts and pendulum.from_timestamp(self._end_ts),
+            channel_filter=self.channel_filter,
+            channel_ids=self.channel_ids,
         )
 
         slice_yielded = False
         for message_chunk in messages_stream.stream_slices(stream_state={self.cursor_field: messages_start_date.timestamp()}):
             self.logger.info(f"Syncing replies {message_chunk}")
             for message in messages_stream.read_records(sync_mode=SyncMode.full_refresh, stream_slice=message_chunk):
+                if int(message.get("reply_count") or 0) <= 0:
+                    continue
                 yield {"channel": message_chunk["channel"], self.sub_primary_key_2: message[self.sub_primary_key_2]}
                 slice_yielded = True
         if not slice_yielded:
@@ -384,18 +463,31 @@ class SourceSlack(AbstractSource):
         end_date = end_date and pendulum.parse(end_date)
         threads_lookback_window = pendulum.Duration(days=config["lookback_window"])
         channel_filter = config.get("channel_filter", [])
+        channel_ids = config.get("channel_ids", [])
         should_join_to_channels = config.get("join_channels")
 
-        channels = Channels(authenticator=authenticator, join_channels=should_join_to_channels, channel_filter=channel_filter)
+        channels = Channels(
+            authenticator=authenticator,
+            join_channels=should_join_to_channels,
+            channel_filter=channel_filter,
+            channel_ids=channel_ids,
+        )
         streams = [
             channels,
-            ChannelMembers(authenticator=authenticator, channel_filter=channel_filter),
+            ChannelMembers(
+                authenticator=authenticator,
+                channel_filter=channel_filter,
+                channel_ids=channel_ids,
+                join_channels=should_join_to_channels,
+            ),
             ChannelMessages(
                 parent=channels,
                 authenticator=authenticator,
                 default_start_date=default_start_date,
                 end_date=end_date,
                 channel_filter=channel_filter,
+                channel_ids=channel_ids,
+                join_channels=should_join_to_channels,
             ),
             Threads(
                 authenticator=authenticator,
@@ -403,6 +495,8 @@ class SourceSlack(AbstractSource):
                 end_date=end_date,
                 lookback_window=threads_lookback_window,
                 channel_filter=channel_filter,
+                channel_ids=channel_ids,
+                join_channels=should_join_to_channels,
             ),
             Users(authenticator=authenticator),
         ]

@@ -38,8 +38,18 @@
           "minLength": 0
         },
         "title": "Channel name filter",
-        "description": "A channel name list (without leading '#' char) which limit the channels from which you'd like to sync. Empty list means no filter.",
+        "description": "Channel names (without leading '#' char) to limit which channels are synced. When combined with `channel_ids`, names are resolved after ID resolution and the result is merged by channel id (no duplicates). Empty list means no name-based filter.",
         "examples": ["channel_one", "channel_two"]
+      },
+      "channel_ids": {
+        "type": "array",
+        "default": [],
+        "items": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title": "Channel IDs",
+        "description": "Optional list of Slack conversation IDs (e.g. public channels starting with `C`, private with `G`). Preferred for large workspaces: each channel is resolved with `conversations.info` without paginating the entire workspace. Empty list means no ID-based filter. Can be combined with `channel_filter`; channels are unioned and deduplicated by id."
       },
       "credentials": {
         "title": "Authentication mechanism",

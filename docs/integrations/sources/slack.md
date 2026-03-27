@@ -87,8 +87,9 @@ We recommend creating a restricted, read-only key specifically for Airbyte acces
 5. **Required** Enter your `start_date`.
 6. **Required** Enter your `lookback_window`, which corresponds to amount of days in the past from which you want to sync data.
 7. Toggle `join_channels`, if you want to join all channels or to sync data only from channels the bot is already in. If not set, you'll need to manually add the bot to all the channels from which you'd like to sync messages.
-8. Enter your `channel_filter`, this should be list of channel names (without leading '#' char) that limits the channels from which you'd like to sync. If no channels are specified, Airbyte will replicate all data.
-9. Click **Set up source**.
+8. Enter your `channel_filter` (optional): channel names without a leading `#` to limit which channels are synced. For large workspaces, prefer **`channel_ids`** (Slack conversation IDs such as `C…` / `G…`) so the connector resolves channels with `conversations.info` instead of paginating the entire workspace channel list.
+9. Optionally enter **`channel_ids`**: a list of Slack conversation IDs. You can combine `channel_ids` and `channel_filter`; the connector merges and deduplicates by channel id.
+10. Click **Set up source**.
 <!-- /env:cloud -->
 
 <!-- env:oss -->
@@ -99,9 +100,10 @@ We recommend creating a restricted, read-only key specifically for Airbyte acces
 3. **Required** Enter your `start_date`.
 4. **Required** Enter your `lookback_window`, which corresponds to amount of days in the past from which you want to sync data.
 5. Toggle `join_channels`, if you want to join all channels or to sync data only from channels the bot is already in. If not set, you'll need to manually add the bot to all the channels from which you'd like to sync messages.
-6. Enter your `channel_filter`, this should be list of channel names (without leading '#' char) that limits the channels from which you'd like to sync. If no channels are specified, Airbyte will replicate all data.
-7. Enter your `api_token`.
-8. Click **Set up source**.
+6. Enter your `channel_filter` (optional): channel names without a leading `#` to limit which channels are synced. For large workspaces, prefer **`channel_ids`** (Slack conversation IDs) to avoid full-workspace channel enumeration.
+7. Optionally enter **`channel_ids`**; you may combine with `channel_filter` (merged and deduplicated by id).
+8. Enter your `api_token`.
+9. Click **Set up source**.
 <!-- /env:oss -->
 
 <HideInUI>
@@ -130,7 +132,12 @@ For most of the streams, the Slack source connector uses the [Conversations API]
 
 The connector is restricted by normal Slack [requests limitation](https://api.slack.com/docs/rate-limits).
 
-It is recommended to sync required channels only, this can be done by specifying config variable `channel_filter` in settings.
+To reduce API usage and avoid rate limits:
+
+- **Scope channels:** Sync only what you need. Use **`channel_filter`** (names) and/or **`channel_ids`** (IDs). For workspaces with many channels, **`channel_ids`** is preferred: each ID is resolved via `conversations.info` without walking the full `conversations.list` pagination.
+- **Name-based filter:** When only `channel_filter` is set, the connector stops listing channels once every requested name has been found (instead of always paging through the entire workspace).
+- **Threads:** The connector only calls `conversations.replies` for messages that have replies (positive `reply_count`), not for every message in history.
+- **Streams:** Selecting fewer streams in the connection catalog (for example, omitting streams you do not use) reduces work further.
 
 ## Data type map
 
@@ -163,6 +170,7 @@ Slack has [rate limit restrictions](https://api.slack.com/docs/rate-limits).
 
 | Version | Date       | Pull Request                                             | Subject                                                                             |
 |:--------|:-----------|:---------------------------------------------------------|:------------------------------------------------------------------------------------|
+| 0.3.10 | 2026-03-27 | | Add optional `channel_ids`, early-exit `conversations.list` for name filters, and `conversations.replies` only when `reply_count` is positive. |
 | 0.3.9 | 2024-02-12 | [35157](https://github.com/airbytehq/airbyte/pull/35157) | Manage dependencies with Poetry. |
 | 0.3.8   | 2024-02-09 | [35131](https://github.com/airbytehq/airbyte/pull/35131) | Fixed the issue when `schema discovery` fails with `502` due to the platform timeout |
 | 0.3.7   | 2024-01-10 | [1234](https://github.com/airbytehq/airbyte/pull/1234) | prepare for airbyte-lib                                                        |
