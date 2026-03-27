@@ -11,6 +11,8 @@ authors = ["Airbyte <contact@airbyte.io>"]
 [tool.poetry.dependencies]
 python = "~3.10"
 dagger-io = "==0.9.6"
+# Pip/pipx ignores poetry.lock; gql 4.x breaks dagger 0.9.6 (TypeError: Not an AST Node: GraphQLRequest).
+gql = ">=3.4.0,<4"
 asyncer = "^0.0.2"
 anyio = "^3.4.1"
 more-itertools = "^8.11.0"
