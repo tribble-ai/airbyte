@@ -184,7 +184,7 @@ class Channels(ChanneledStream):
         response = self._session.get(url, params=params)
         response.raise_for_status()
         data = response.json()
-        if data.get("ok") is False:
+        if data.get("ok", False) is False:
             raise Exception(f"conversations.info failed for channel {channel_id}: {data.get('error')}")
         return data["channel"]
 
@@ -199,7 +199,7 @@ class Channels(ChanneledStream):
             response = self._session.get(url, params=params)
             response.raise_for_status()
             data = response.json()
-            if data.get("ok") is False:
+            if data.get("ok", False) is False:
                 raise Exception(f"conversations.list failed: {data.get('error')}")
             for ch in data.get("channels", []):
                 name = ch.get("name")
