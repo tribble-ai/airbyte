@@ -4,6 +4,7 @@
 
 import copy
 import os
+import re
 from typing import MutableMapping
 
 import pytest
@@ -15,14 +16,15 @@ os.environ["REQUEST_CACHE_PATH"] = "REQUEST_CACHE_PATH"
 def conversations_list(requests_mock):
     return requests_mock.register_uri(
         "GET",
-        "https://slack.com/api/conversations.list?limit=1000&types=public_channel",
+        re.compile(r"https://slack\.com/api/conversations\.list.*"),
         json={
+            "ok": True,
             "channels": [
                 {"name": "advice-data-architecture", "id": 1, "is_member": False},
                 {"name": "advice-data-orchestration", "id": 2, "is_member": True},
                 {"name": "airbyte-for-beginners", "id": 3, "is_member": False},
                 {"name": "good-reads", "id": 4, "is_member": True},
-            ]
+            ],
         },
     )
 
