@@ -170,6 +170,7 @@ Slack has [rate limit restrictions](https://api.slack.com/docs/rate-limits).
 
 | Version | Date       | Pull Request                                             | Subject                                                                             |
 |:--------|:-----------|:---------------------------------------------------------|:------------------------------------------------------------------------------------|
+| 0.3.11 | 2026-10-12 | | Track `channel_messages` and `threads` cursors per channel so newly added channels sync from `start_date`. |
 | 0.3.10 | 2026-03-27 | | Add optional `channel_ids`, early-exit `conversations.list` for name filters, and `conversations.replies` only when `reply_count` is positive. |
 | 0.3.9 | 2024-02-12 | [35157](https://github.com/airbytehq/airbyte/pull/35157) | Manage dependencies with Poetry. |
 | 0.3.8   | 2024-02-09 | [35131](https://github.com/airbytehq/airbyte/pull/35131) | Fixed the issue when `schema discovery` fails with `502` due to the platform timeout |
