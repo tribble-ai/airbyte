@@ -469,3 +469,31 @@ def test_read_does_not_checkpoint_past_failed_history(requests_mock, legacy_toke
 
     assert [m for m in messages if m.type == Type.RECORD] == []
     assert [m for m in messages if m.type == Type.STATE] == []
+
+
+def test_threads_stops_requesting_replies_after_channel_error(
+    requests_mock, authenticator, legacy_token_config, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("REQUEST_CACHE_PATH", str(tmp_path))
+    parents = [{"ts": f"157788000{i}.000100", "reply_count": 1} for i in range(3)]
+    requests_mock.register_uri("GET", HISTORY_URL, json={"ok": True, "messages": parents})
+    requests_mock.register_uri("GET", REPLIES_URL, json={"ok": True, "messages": []})
+    unreadable = requests_mock.register_uri("GET", f"{REPLIES_URL}?channel=3", json={"ok": False, "error": "not_in_channel"})
+    stream = _threads(authenticator, legacy_token_config, "2019-12-01T00:00:00Z", "2020-01-02T00:00:00Z")
+    stream.state = {"channels": {"3": SYNCED_UNTIL, "4": SYNCED_UNTIL}}
+
+    _read_all(stream)
+
+    assert unreadable.call_count == 1
+    assert stream.state["channels"] == {"3": SYNCED_UNTIL, "4": END_TS}
+
+
+def test_read_records_skips_channel_that_already_failed(requests_mock, authenticator, legacy_token_config, monkeypatch, tmp_path):
+    monkeypatch.setenv("REQUEST_CACHE_PATH", str(tmp_path))
+    replies = requests_mock.register_uri("GET", REPLIES_URL, json={"ok": False, "error": "not_in_channel"})
+    stream = _threads(authenticator, legacy_token_config, "2019-12-01T00:00:00Z", "2020-01-02T00:00:00Z")
+
+    for ts in ("1577880000.000100", "1577880001.000100"):
+        assert list(stream.read_records(sync_mode=SyncMode.incremental, stream_slice={"channel": 3, "ts": ts})) == []
+
+    assert replies.call_count == 1

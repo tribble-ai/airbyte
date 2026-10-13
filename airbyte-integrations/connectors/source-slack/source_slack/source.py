@@ -410,6 +410,8 @@ class IncrementalMessageStream(ChanneledStream, IncrementalMixin, ABC):
         if not stream_slice:
             # nothing to read: this slice only exists to emit a state message
             return
+        if str(stream_slice["channel"]) in self._failed_channels:
+            return
         try:
             yield from super().read_records(sync_mode, cursor_field=cursor_field, stream_slice=stream_slice, stream_state=stream_state)
         except SlackChannelError as error:
@@ -521,6 +523,9 @@ class Threads(IncrementalMessageStream):
                     if int(message.get("reply_count") or 0) <= 0:
                         continue
                     yield {"channel": channel_id, self.sub_primary_key_2: message[self.sub_primary_key_2]}
+                    # The slice was read before this resumes, so stop as soon as its replies request fails.
+                    if str(channel_id) in self._failed_channels:
+                        break
 
             # Slices are read as they are yielded, so every thread found in this channel's window has been read by now.
             if messages_start_date < scan_end and str(channel_id) not in messages_stream._failed_channels:
