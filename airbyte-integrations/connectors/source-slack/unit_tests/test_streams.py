@@ -274,3 +274,198 @@ def test_threads_stream_slices_skips_messages_without_replies(
     slices = list(stream.stream_slices(stream_state={}))
     assert slices == [{}]
     
+
+@pytest.fixture
+def fast_backoff(monkeypatch):
+    # The CDK sleeps for the backoff time plus a second before every retry.
+    monkeypatch.setattr("source_slack.source.SlackStream.backoff_time", lambda self, response: 0.001)
+    monkeypatch.setattr("airbyte_cdk.sources.streams.http.rate_limiting.time.sleep", lambda seconds: None)
+
+
+def _read_all(stream):
+    records = []
+    for stream_slice in stream.stream_slices():
+        records.extend(stream.read_records(sync_mode=SyncMode.incremental, stream_slice=stream_slice))
+    return records
+
+
+def _threads(authenticator, config, start_date, end_date):
+    return Threads(
+        authenticator=authenticator,
+        default_start_date=pendulum.parse(start_date),
+        end_date=pendulum.parse(end_date),
+        lookback_window=pendulum.Duration(days=1),
+        channel_filter=config["channel_filter"],
+    )
+
+
+HISTORY_URL = "https://slack.com/api/conversations.history"
+REPLIES_URL = "https://slack.com/api/conversations.replies"
+SYNCED_UNTIL = pendulum.parse("2020-01-01T00:00:00Z").timestamp()
+END_TS = pendulum.parse("2020-01-02T00:00:00Z").timestamp()
+
+
+def test_channel_messages_retries_transient_error_without_reusing_cached_failure(
+    requests_mock, authenticator, legacy_token_config, monkeypatch, tmp_path, fast_backoff
+):
+    monkeypatch.setenv("REQUEST_CACHE_PATH", str(tmp_path))
+    history = requests_mock.register_uri(
+        "GET",
+        HISTORY_URL,
+        [
+            {"json": {"ok": False, "error": "internal_error"}},
+            {"json": {"ok": True, "messages": [{"ts": "1577880000.000100"}]}},
+        ],
+    )
+    stream = _channel_messages(authenticator, legacy_token_config, "2019-12-01T00:00:00Z", "2020-01-02T00:00:00Z")
+    stream.state = {"channels": {"3": SYNCED_UNTIL, "4": SYNCED_UNTIL}}
+
+    records = _read_all(stream)
+
+    assert history.call_count == 3  # channel 3 fails once and is retried; channel 4 succeeds
+    assert [r["channel_id"] for r in records] == [3, 4]
+    assert stream.state["channels"] == {"3": END_TS, "4": END_TS}
+
+
+@pytest.mark.parametrize("error", ("internal_error", "invalid_auth"))
+def test_channel_messages_persistent_error_fails_without_advancing(
+    requests_mock, authenticator, legacy_token_config, monkeypatch, tmp_path, fast_backoff, error
+):
+    monkeypatch.setenv("REQUEST_CACHE_PATH", str(tmp_path))
+    requests_mock.register_uri("GET", HISTORY_URL, json={"ok": False, "error": error})
+    stream = _channel_messages(authenticator, legacy_token_config, "2019-12-01T00:00:00Z", "2020-01-02T00:00:00Z")
+    stream.state = {"channels": {"3": SYNCED_UNTIL, "4": SYNCED_UNTIL}}
+
+    with pytest.raises(Exception):
+        _read_all(stream)
+
+    assert stream.state["channels"] == {"3": SYNCED_UNTIL, "4": SYNCED_UNTIL}
+
+
+def test_channel_messages_channel_error_holds_back_only_that_channel(
+    requests_mock, authenticator, legacy_token_config, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("REQUEST_CACHE_PATH", str(tmp_path))
+    requests_mock.register_uri("GET", HISTORY_URL, json={"ok": True, "messages": []})
+    unreadable = requests_mock.register_uri("GET", f"{HISTORY_URL}?channel=3", json={"ok": False, "error": "not_in_channel"})
+    stream = _channel_messages(authenticator, legacy_token_config, "2019-12-01T00:00:00Z", "2020-01-03T00:00:00Z")
+    stream.state = {"channels": {"3": SYNCED_UNTIL, "4": SYNCED_UNTIL}}
+
+    _read_all(stream)
+
+    # Channel 3's first window failed, so its second window is not requested and its cursor stays put.
+    assert unreadable.call_count == 1
+    assert stream.state["channels"] == {"3": SYNCED_UNTIL, "4": pendulum.parse("2020-01-03T00:00:00Z").timestamp()}
+
+
+def test_threads_parent_scan_error_holds_back_channel(requests_mock, authenticator, legacy_token_config, monkeypatch, tmp_path):
+    monkeypatch.setenv("REQUEST_CACHE_PATH", str(tmp_path))
+    requests_mock.register_uri("GET", HISTORY_URL, json={"ok": True, "messages": []})
+    requests_mock.register_uri("GET", f"{HISTORY_URL}?channel=3", json={"ok": False, "error": "channel_not_found"})
+    stream = _threads(authenticator, legacy_token_config, "2019-12-01T00:00:00Z", "2020-01-02T00:00:00Z")
+    stream.state = {"channels": {"3": SYNCED_UNTIL, "4": SYNCED_UNTIL}}
+
+    _read_all(stream)
+
+    assert stream.state["channels"] == {"3": SYNCED_UNTIL, "4": END_TS}
+
+
+def test_threads_retries_transient_replies_error(
+    requests_mock, authenticator, legacy_token_config, monkeypatch, tmp_path, fast_backoff
+):
+    monkeypatch.setenv("REQUEST_CACHE_PATH", str(tmp_path))
+    requests_mock.register_uri("GET", HISTORY_URL, json={"ok": True, "messages": [{"ts": "1577880000.000100", "reply_count": 1}]})
+    replies = requests_mock.register_uri(
+        "GET",
+        REPLIES_URL,
+        [
+            {"json": {"ok": False, "error": "internal_error"}},
+            {"json": {"ok": True, "messages": [{"ts": "1577880000.000100"}, {"ts": "1577880100.000200"}]}},
+        ],
+    )
+    stream = _threads(authenticator, legacy_token_config, "2019-12-01T00:00:00Z", "2020-01-02T00:00:00Z")
+    stream.state = {"channels": {"3": SYNCED_UNTIL, "4": SYNCED_UNTIL}}
+
+    records = _read_all(stream)
+
+    # Two thread parents per channel, plus one retry for channel 3's first thread.
+    assert replies.call_count == 5
+    assert len(records) == 8
+    assert stream.state["channels"] == {"3": END_TS, "4": END_TS}
+
+
+@pytest.mark.parametrize("error", ("internal_error", "missing_scope"))
+def test_threads_persistent_replies_error_fails_without_advancing(
+    requests_mock, authenticator, legacy_token_config, monkeypatch, tmp_path, fast_backoff, error
+):
+    monkeypatch.setenv("REQUEST_CACHE_PATH", str(tmp_path))
+    requests_mock.register_uri("GET", HISTORY_URL, json={"ok": True, "messages": [{"ts": "1577880000.000100", "reply_count": 1}]})
+    requests_mock.register_uri("GET", REPLIES_URL, json={"ok": False, "error": error})
+    stream = _threads(authenticator, legacy_token_config, "2019-12-01T00:00:00Z", "2020-01-02T00:00:00Z")
+    stream.state = {"channels": {"3": SYNCED_UNTIL, "4": SYNCED_UNTIL}}
+
+    with pytest.raises(Exception):
+        _read_all(stream)
+
+    assert stream.state["channels"] == {"3": SYNCED_UNTIL, "4": SYNCED_UNTIL}
+
+
+def test_threads_replies_channel_error_holds_back_only_that_channel(
+    requests_mock, authenticator, legacy_token_config, monkeypatch, tmp_path
+):
+    monkeypatch.setenv("REQUEST_CACHE_PATH", str(tmp_path))
+    requests_mock.register_uri("GET", HISTORY_URL, json={"ok": True, "messages": [{"ts": "1577880000.000100", "reply_count": 1}]})
+    requests_mock.register_uri("GET", REPLIES_URL, json={"ok": True, "messages": [{"ts": "1577880000.000100"}]})
+    requests_mock.register_uri("GET", f"{REPLIES_URL}?channel=3", json={"ok": False, "error": "not_in_channel"})
+    stream = _threads(authenticator, legacy_token_config, "2019-12-01T00:00:00Z", "2020-01-02T00:00:00Z")
+    stream.state = {"channels": {"3": SYNCED_UNTIL, "4": SYNCED_UNTIL}}
+
+    records = _read_all(stream)
+
+    assert {r["channel_id"] for r in records} == {4}
+    assert stream.state["channels"] == {"3": SYNCED_UNTIL, "4": END_TS}
+
+
+def test_threads_deleted_thread_is_treated_as_empty(requests_mock, authenticator, legacy_token_config, monkeypatch, tmp_path):
+    monkeypatch.setenv("REQUEST_CACHE_PATH", str(tmp_path))
+    requests_mock.register_uri("GET", HISTORY_URL, json={"ok": True, "messages": [{"ts": "1577880000.000100", "reply_count": 1}]})
+    requests_mock.register_uri("GET", REPLIES_URL, json={"ok": False, "error": "thread_not_found"})
+    stream = _threads(authenticator, legacy_token_config, "2019-12-01T00:00:00Z", "2020-01-02T00:00:00Z")
+    stream.state = {"channels": {"3": SYNCED_UNTIL, "4": SYNCED_UNTIL}}
+
+    assert _read_all(stream) == []
+    assert stream.state["channels"] == {"3": END_TS, "4": END_TS}
+
+
+def test_read_does_not_checkpoint_past_failed_history(requests_mock, legacy_token_config, monkeypatch, tmp_path, fast_backoff):
+    monkeypatch.setenv("REQUEST_CACHE_PATH", str(tmp_path))
+    requests_mock.register_uri("GET", HISTORY_URL, json={"ok": False, "error": "internal_error"})
+    config = {**legacy_token_config, "start_date": "2019-12-01T00:00:00Z", "end_date": "2020-01-02T00:00:00Z"}
+    catalog = ConfiguredAirbyteCatalog.parse_obj(
+        {
+            "streams": [
+                {
+                    "stream": {"name": "channel_messages", "json_schema": {}, "supported_sync_modes": ["incremental"]},
+                    "sync_mode": "incremental",
+                    "destination_sync_mode": "append",
+                }
+            ]
+        }
+    )
+    state = [
+        AirbyteStateMessage(
+            type=AirbyteStateType.STREAM,
+            stream=AirbyteStreamState(
+                stream_descriptor=StreamDescriptor(name="channel_messages"),
+                stream_state=AirbyteStateBlob.parse_obj({"channels": {"3": SYNCED_UNTIL, "4": SYNCED_UNTIL}}),
+            ),
+        )
+    ]
+
+    messages = []
+    with pytest.raises(Exception):
+        for message in SourceSlack().read(Mock(), config, catalog, state):
+            messages.append(message)
+
+    assert [m for m in messages if m.type == Type.RECORD] == []
+    assert [m for m in messages if m.type == Type.STATE] == []

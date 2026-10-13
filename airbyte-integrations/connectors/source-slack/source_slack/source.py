@@ -9,6 +9,7 @@ from typing import Any, Iterable, List, Mapping, MutableMapping, Optional, Tuple
 
 import pendulum
 import requests
+import requests_cache
 from airbyte_cdk import AirbyteLogger
 from airbyte_cdk.models import SyncMode
 from airbyte_cdk.sources import AbstractSource
@@ -18,6 +19,33 @@ from airbyte_cdk.sources.streams.http.requests_native_auth import TokenAuthentic
 from pendulum import DateTime
 
 from .utils import chunk_date_range
+
+# Slack reports most failures as HTTP 200 with `"ok": false`; these are worth retrying.
+RETRYABLE_SLACK_ERRORS = {"internal_error", "fatal_error", "service_unavailable", "request_timeout", "ratelimited"}
+# The bot can no longer read this channel. Only that channel's cursor is held back.
+CHANNEL_SLACK_ERRORS = {"channel_not_found", "not_in_channel"}
+# The thread is gone, so there are no replies to read.
+EMPTY_SLACK_ERRORS = {"thread_not_found"}
+
+
+class SlackApiError(Exception):
+    def __init__(self, error: str):
+        self.error = error
+        super().__init__(f"Slack API error: {error}")
+
+
+class SlackChannelError(SlackApiError):
+    pass
+
+
+def slack_error(response: requests.Response) -> Optional[str]:
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if isinstance(body, Mapping) and body.get("ok") is False:
+        return body.get("error") or "unknown_error"
+    return None
 
 
 class SlackStream(HttpStream, ABC):
@@ -299,6 +327,7 @@ class IncrementalMessageStream(ChanneledStream, IncrementalMixin, ABC):
         self._start_ts = default_start_date.timestamp()
         self._end_ts = end_date and end_date.timestamp()
         self._state: MutableMapping[str, Any] = {}
+        self._failed_channels: set = set()
         self.set_sub_primary_key()
         super().__init__(**kwargs)
 
@@ -324,9 +353,26 @@ class IncrementalMessageStream(ChanneledStream, IncrementalMixin, ABC):
         return self._state[self.channels_state_field]
 
     def _advance_channel_cursor(self, channel_id: str, ts: float) -> None:
-        channel_cursors = self._state.setdefault(self.channels_state_field, {})
         key = str(channel_id)
+        if key in self._failed_channels:
+            # Part of this channel's window was not read, so it must be read again next sync.
+            return
+        channel_cursors = self._state.setdefault(self.channels_state_field, {})
         channel_cursors[key] = max(ts, channel_cursors.get(key, ts))
+
+    def _uncache(self, response: requests.Response) -> None:
+        # Otherwise a retry, or a later read of the same window, is served the failed response.
+        cache_key = getattr(response, "cache_key", None)
+        if cache_key and isinstance(self._session, requests_cache.CacheMixin):
+            self._session.cache.delete(cache_key)
+
+    def should_retry(self, response: requests.Response) -> bool:
+        if super().should_retry(response):
+            return True
+        if slack_error(response) in RETRYABLE_SLACK_ERRORS:
+            self._uncache(response)
+            return True
+        return False
 
     def set_sub_primary_key(self):
         if isinstance(self.primary_key, list):
@@ -341,6 +387,14 @@ class IncrementalMessageStream(ChanneledStream, IncrementalMixin, ABC):
         return params
 
     def parse_response(self, response: requests.Response, stream_slice: Mapping[str, Any] = None, **kwargs) -> Iterable[Mapping]:
+        error = slack_error(response)
+        if error:
+            self._uncache(response)
+            if error in EMPTY_SLACK_ERRORS:
+                return
+            if error in CHANNEL_SLACK_ERRORS:
+                raise SlackChannelError(error)
+            raise SlackApiError(error)
         for record in super().parse_response(response, **kwargs):
             record[self.sub_primary_key_1] = stream_slice.get("channel", "")
             record[self.cursor_field] = float(record[self.sub_primary_key_2])
@@ -354,10 +408,13 @@ class IncrementalMessageStream(ChanneledStream, IncrementalMixin, ABC):
         stream_state: Mapping[str, Any] = None,
     ) -> Iterable[Mapping[str, Any]]:
         if not stream_slice:
-            # return an empty iterator
-            # this is done to emit at least one state message when no slices are generated
-            return iter([])
-        return super().read_records(sync_mode, cursor_field=cursor_field, stream_slice=stream_slice, stream_state=stream_state)
+            # nothing to read: this slice only exists to emit a state message
+            return
+        try:
+            yield from super().read_records(sync_mode, cursor_field=cursor_field, stream_slice=stream_slice, stream_state=stream_state)
+        except SlackChannelError as error:
+            self.logger.warning(f"Skipping channel {stream_slice['channel']} for the rest of this sync: {error}")
+            self._failed_channels.add(str(stream_slice["channel"]))
 
 
 class ChannelMessages(HttpSubStream, IncrementalMessageStream):
@@ -376,6 +433,8 @@ class ChannelMessages(HttpSubStream, IncrementalMessageStream):
         for channel in channels:
             start_date = pendulum.from_timestamp(channel_cursors.get(str(channel["id"]), self._start_ts))
             for period in chunk_date_range(start_date=start_date, end_date=end_date):
+                if str(channel["id"]) in self._failed_channels:
+                    break
                 yield {"channel": channel["id"], "oldest": period.start.timestamp(), "latest": period.end.timestamp()}
                 slice_yielded = True
         if not slice_yielded:
@@ -454,6 +513,8 @@ class Threads(IncrementalMessageStream):
                 messages_start_date = pendulum.from_timestamp(self._start_ts)
 
             for period in chunk_date_range(start_date=messages_start_date, end_date=scan_end):
+                if str(channel_id) in self._failed_channels | messages_stream._failed_channels:
+                    break
                 message_chunk = {"channel": channel_id, "oldest": period.start.timestamp(), "latest": period.end.timestamp()}
                 self.logger.info(f"Syncing replies {message_chunk}")
                 for message in messages_stream.read_records(sync_mode=SyncMode.full_refresh, stream_slice=message_chunk):
@@ -462,7 +523,7 @@ class Threads(IncrementalMessageStream):
                     yield {"channel": channel_id, self.sub_primary_key_2: message[self.sub_primary_key_2]}
 
             # Slices are read as they are yielded, so every thread found in this channel's window has been read by now.
-            if messages_start_date < scan_end:
+            if messages_start_date < scan_end and str(channel_id) not in messages_stream._failed_channels:
                 self._advance_channel_cursor(channel_id, scan_end.timestamp())
 
         # State is only checkpointed after a slice, so end with an empty one to save the last channel's cursor.
